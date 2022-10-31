@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 #include <wchar.h>
@@ -63,6 +64,9 @@ struct
 
     struct termios termios;
     wint_t key;
+
+    int screencols;
+    int screenrows;
 } E;
 
 /******************************************************************************/
@@ -71,8 +75,8 @@ struct
 
 void die(const char *s)
 {
-    wprintf(CLEAR_SCREEN);
-    wprintf(CURSOR_HOME);
+    write(STDOUT_FILENO, L"\x1b[2J", 4 * sizeof(wchar_t));
+    write(STDOUT_FILENO, L"\x1b[H", 3 * sizeof(wchar_t));
 
     fwprintf(stderr, L"%s: %s\n", s, strerror(errno));
     exit(EXIT_FAILURE);
@@ -104,23 +108,56 @@ wint_t getch(void)
     return key;
 }
 
+void getmaxyx(int *rows, int *cols)
+{
+    struct winsize ws;
+    DIE_IF(ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) < 0 || ws.ws_col == 0);
+    *rows = ws.ws_row;
+    *cols = ws.ws_col;
+}
+
+/******************************************************************************/
+/* Append Buffer                                                              */
+/******************************************************************************/
+
+typedef struct AppendBuffer
+{
+    wchar_t *data;
+    size_t length;
+} AppendBuffer;
+
+void ab_append(AppendBuffer *ab, wchar_t *s, size_t n)
+{
+    wchar_t *data = realloc(ab->data, (ab->length + n) * sizeof(wchar_t));
+    DIE_IF(!data);
+
+    memcpy(data + ab->length, s, n * sizeof(wchar_t));
+    ab->data = data;
+    ab->length += n;
+}
+
 /******************************************************************************/
 /* Output                                                                     */
 /******************************************************************************/
 
+void draw_rows(AppendBuffer *ab)
+{
+    for (int y = 0; y < E.screenrows; y++)
+    {
+        ab_append(ab, L"~", 1);
+        if (y < E.screenrows - 1)
+            ab_append(ab, L"\r\n", 2);
+    }
+}
+
 void refresh(void)
 {
-    wprintf(CLEAR_SCREEN);
-    wprintf(CURSOR_HOME);
-
-    if (iswcntrl(E.key))
-    {
-        wprintf(L"%d", E.key);
-    }
-    else
-    {
-        wprintf(L"%d ('%lc')", E.key, E.key);
-    }
+    AppendBuffer ab = {0};
+    ab_append(&ab, L"\x1b[2J", 4);
+    ab_append(&ab, L"\x1b[H", 3);
+    draw_rows(&ab);
+    ab_append(&ab, L"\x1b[H", 3);
+    write(STDOUT_FILENO, ab.data, ab.length * sizeof(wchar_t));
 }
 
 /******************************************************************************/
@@ -133,8 +170,8 @@ void process_input(void)
     switch (key)
     {
     case CTRL_KEY('d'):
-        wprintf(CLEAR_SCREEN);
-        wprintf(CURSOR_HOME);
+        write(STDOUT_FILENO, L"\x1b[2J", 4 * sizeof(wchar_t));
+        write(STDOUT_FILENO, L"\x1b[H", 3 * sizeof(wchar_t));
         exit(EXIT_SUCCESS);
 
     default:
@@ -209,11 +246,17 @@ void parse(int argc, char **argv)
 /* Main                                                                       */
 /******************************************************************************/
 
+void begin(void)
+{
+    getmaxyx(&E.screenrows, &E.screencols);
+}
+
 int main(int argc, char **argv)
 {
     setlocale(LC_ALL, "");
     parse(argc, argv);
     raw();
+    begin();
 
     while (1)
     {
